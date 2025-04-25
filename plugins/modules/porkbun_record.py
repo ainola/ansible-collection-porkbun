@@ -37,7 +37,7 @@ options:
     type: str
   name:
     description:
-      - The name of the DNS record.
+      - The name of the DNS record. Use '@' for the root.
     required: true
     type: str
   content:
@@ -91,7 +91,7 @@ EXAMPLES = r'''
     state: present
     domain: example.com
     record_type: MX
-    name: mail
+    name: '@'
     content: "10 mail.example.com."
     ttl: 7200
     api_key: your_api_key
@@ -123,39 +123,50 @@ class PorkbunAPI:
             'secretapikey': secret_api_key
         }
 
+    def _format_payload(self, name, content, ttl, record_type):
+        data = {
+            **self.base_params,
+            'content': content,
+            'ttl': ttl,
+            'type': record_type,
+        }
+
+        # Per the API docs, "name" is an optional parameter - omit it for
+        # working on the root of the domain. Support for "@" is just useful for
+        # the user.
+        if name != '@':
+            data['name'] = name
+
+        return json.dumps(data)
+
     def get_records(self, domain):
         response = open_url(f'{self.API_URL}/retrieve/{domain}',
                             method="POST", headers=self.headers, data=json.dumps(self.base_params))
         result = json.loads(response.read())
         return result['records']
 
-    def get_record(self, domain, record_type, name):
+    def get_record(self, domain, record_type, name=None):
         records = self.get_records(domain)
         for record in records:
-            if record['type'] == record_type and record['name'] == name + "." + domain:
+            if name == '@':
+                fqdn = domain
+            else:
+                fqdn = name + "." + domain
+
+            if record['type'] == record_type and record['name'] == fqdn:
                 return record
         return None
 
     def create_record(self, domain, record_type, name, content, ttl):
-        data = {
-            **self.base_params,
-            'type': record_type,
-            'name': name,
-            'content': content,
-            'ttl': ttl
-        }
+        data = self._format_payload(name, content, ttl, record_type)
         response = open_url(f'{self.API_URL}/create/{domain}',
-                            method='POST', headers=self.headers, data=json.dumps(data))
+                            method='POST', headers=self.headers, data=data)
         return json.loads(response.read())
 
-    def update_record(self, domain, record_type, name, content, ttl):
-        data = {
-            **self.base_params,
-            'content': content,
-            'ttl': ttl
-        }
-        response = open_url(f'{self.API_URL}/editByNameType/{domain}/{record_type}/{name}',
-                            method='POST', headers=self.headers, data=json.dumps(data))
+    def update_record(self, domain, record_id, record_type, name, content, ttl):
+        data = self._format_payload(name, content, ttl, record_type)
+        response = open_url(f'{self.API_URL}/edit/{domain}/{record_id}',
+                            method='POST', headers=self.headers, data=data)
         return json.loads(response.read())
 
     def delete_record(self, domain, record_id):
@@ -202,7 +213,7 @@ def main():
             module.exit_json(changed=True, msg="DNS record created")
         elif record['content'] != content or int(record['ttl']) != ttl:
             # The record exists but the content or ttl does not match, update it
-            porkbun.update_record(domain, record_type, name, content, ttl)
+            porkbun.update_record(domain, record['id'], record_type, name, content, ttl)
             module.exit_json(changed=True, msg="DNS record updated")
         else:
             # The record already exists and the content and ttl matches
